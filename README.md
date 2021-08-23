@@ -13,7 +13,7 @@ the `data/plugins` folder.
 ## Basic Usage
 A basic Kinc project can be created by using the `kinc:create-kinc-project` command
 (`ctrl+k`). Alternatively, you can create a basic C program that uses kincmake as it's
- build system by using the `kinc:create-kincmake-project` command (`ctrl+alt+k`).
+ build system by using the `kinc:create-kincmake-project` command (`ctrl+alt+k`). When a project gets created we add build(`ctrl+b`) and compile(`ctrl+shift+b`) commands in a .lite_project.lua file that you can configure by using the `Core:Open Project Module` command.
 
 ## License
 This project is free software; you can redistribute it and/or modify it under
