@@ -1,18 +1,26 @@
--- mod-version:2 -- lite-xl 2.0
+-- mod-version:3 -- lite-xl 2.1
 local core = require "core"
 local command = require "core.command"
 local keymap = require "core.keymap"
 local common = require "core.common"
 
 
+local noop = function() end
+
 local function suggest_directory(text)
   text = common.home_expand(text)
   return common.home_encode_list(text == "" and core.recent_projects or common.dir_path_suggest(text))
 end
 
+local tmp = ""
+if PLATFORM:find("Windows") then
+  tmp = ".bat"
+else
+  tmp =".sh"
+end
 local kinc = {
-  path = "Kinc",
-  nodePath = "node",
+  path = "./Kinc",
+  script_ext = tmp,
   isKore = true,
   isTerm = false,
   projectName = "New Project"
@@ -49,7 +57,7 @@ end
 
 local function createFiles()
   local dir_path = core.project_dir .. PATHSEP
-  local f = io.open(dir_path .. "kincfile.js","wb")
+  local f = io.open(dir_path .. "kfile.js","wb")
   
   f:write(string.format("let project = new Project('%s');\n\n",kinc.projectName))
   
@@ -97,8 +105,58 @@ local function createFiles()
       f:write("!Deployment/keepme\n")
       f:close()
   end
-  
-  core.reschedule_project_scan()
+  local make_path = ""
+  if not kinc.isKore then
+    make_path = "." --- Default to kmake being at the root
+    f = io.open(dir_path .. "make" .. kinc.script_ext,"wb")
+    if PLATFORM:find("Windows") then
+      f:write([[
+      @if exist "%~dp0Tools\windows_x64\kmake.exe" (
+        @call "%~dp0Tools\windows_x64\kmake.exe" %*
+      ) else (
+        echo kmake was not found, please run the get_dlc script.
+      ) ]] )
+    else
+      f:write(
+[[ #!/usr/bin/env bash
+
+. `dirname "$0"`/Tools/platform.sh
+MAKE="`dirname "$0"`/Tools/$KINC_PLATFORM/kmake$KINC_EXE_SUFFIX"
+
+if [ -f "$MAKE" ]; then
+  exec $MAKE "$@"
+else 
+  echo "kmake was not found, please run the get_dlc script."
+  exit 1
+fi]])
+      f = io.open(dir_path .. "Tools/platform" .. kinc.script_ext,"wb")
+      f:write('if [[ "$OSTYPE" == "linux-gnu"* ]]; then\n')
+      f:write("  MACHINE_TYPE=`uname -m`\n")
+      f:write('  if [[ "$MACHINE_TYPE" == "armv"* ]]; then\n')
+      f:write('    KINC_PLATFORM=linux_arm\n')
+      f:write('  elif [[ "$MACHINE_TYPE" == "aarch64"* ]]; then\n')
+      f:write('    KINC_PLATFORM=linux_arm64\n')
+      f:write('  elif [[ "$MACHINE_TYPE" == "x86_64"* ]]; then\n')
+      f:write('    KINC_PLATFORM=linux_x64\n')
+      f:write('  else\n')
+      f:write([[ echo "Unknown Linux machine '$MACHINE_TYPE', please edit Tools/platform.sh"\n]])
+      f:write('    exit 1\n')
+      f:write('  fi\n')
+      f:write('  elif [[ "$OSTYPE" == "darwin"* ]]; then\n')
+      f:write('    KINC_PLATFORM=macos\n')
+      f:write('  elif [[ "$OSTYPE" == "FreeBSD"* ]]; then\n')
+      f:write('    KINC_PLATFORM=freebsd_x64\n')
+      f:write('  elif [[ "$OSTYPE" == "msys"* || "$OSTYPE" == "cygwin"* ]]; then\n')
+      f:write('    KINC_PLATFORM=windows_x64\n')
+      f:write('    KINC_EXE_SUFFIX=.exe\n')
+      f:write('  else\n')
+      f:write([[ echo "Unknown platform '$OSTYPE', please edit Tools/platform.sh" \n]])
+      f:write('  exit 1\n')
+      f:write('fi\n')
+   end
+  else
+    make_path = kinc.path
+  end
   
   local stat = system.get_file_info(dir_path .. ".lite_project.lua")
   if not stat then
@@ -111,17 +169,17 @@ local function createFiles()
     f:write("\t[\"kinc:build-project\"] = function()\n")
     f:write("\t\tcore.log \"Building...\"\n")
     f:write("\t\tconsole.run {\n")
-    f:write(string.format("\t\t\tcommand = \"%s %s  \",\n",kinc.nodePath,kinc.path .. PATHSEP .. "make"))
+    f:write(string.format("\t\t\tcommand = \"%s  \",\n",kinc.path .. PATHSEP .. "make" .. kinc.script_ext))
     f:write("\t\t\tfile_pattern = \"(.*):(%d+):(%d+): (.*)$\",\n")
-    f:write("\t\t\ton_complete = function() core.reschedule_project_scan() core.log \"Build complete\" end,\n")
+    f:write("\t\t\ton_complete = function() core.log \"Build complete\" end,\n")
     f:write("\t\t}\n\tend,\n")
     
     f:write("\t[\"kinc:compile-project\"] = function()\n")
     f:write("\t\tcore.log \"Building...\"\n")
     f:write("\t\tconsole.run {\n")
-    f:write(string.format("\t\t\tcommand = \"%s %s --compile \",\n",kinc.nodePath,kinc.path .. PATHSEP .. "make"))
+    f:write(string.format("\t\t\tcommand = \"%s --compile \",\n",kinc.path .. PATHSEP .. "make" .. kinc.script_ext))
     f:write("\t\t\tfile_pattern = \"(.*):(%d+):(%d+): (.*)$\",\n")
-    f:write("\t\t\ton_complete = function() core.reschedule_project_scan() core.log \"Build complete\" end,\n")
+    f:write("\t\t\ton_complete = function() core.log \"Build complete\" end,\n")
     f:write("\t\t}\n\tend,\n")
     
     f:write("})\n\n")
@@ -144,57 +202,88 @@ command.add(nil, {
   
   ["kinc:create-kinc-project"] = function()
     core.log "Creating Kinc Project..."
-    core.command_view:enter("Project Name", function(name)
-      local stat = system.get_file_info(core.project_dir .. PATHSEP .. "kincfile.js")
-      if not stat then
-        if name ~= "" then
-          kinc.projectName = name
-        end
-        createFiles()
-      else
-        core.log "Project already contains a kincfile.js ergo it already is a Kinc Project"
-      end
-    end)
-  end,
-  
-  --- A kincmake project is a non-kinc based project
-  ["kinc:create-kincmake-project"] = function()
-    core.log "Creating kincmake based Project..."
-    core.command_view:enter("Project Name", function(name)
-      local stat = system.get_file_info(core.project_dir .. PATHSEP .. "kincfile.js")
-      if not stat then
-        if name ~= "" then
-          kinc.projectName = name
-        end
-        core.command_view:enter("Is Terminal Application ? (i.e. 0 or 1)", function(choice)
-          kinc.isKore = false
-          if choice == "1" then 
-            kinc.isTerm = true
+    core.command_view:enter("Project Name",
+    { submit = function(name)
+        local stat = system.get_file_info(core.project_dir .. PATHSEP .. "kfile.js")
+        if not stat then
+          if name ~= "" then
+            kinc.projectName = name
           end
           createFiles()
-        end)
-      else
-        core.log "Project already contains a kincfile.js ergo it already is a kincmake Project"
-      end
-    end)
+        else
+          core.log "Project already contains a kfile.js ergo it already is a Kinc Project"
+        end
+      end})
   end,
+  
+  --- A kmake project is a non-kinc based project
+  ["kinc:create-kmake-project"] = function()
+    core.log "Creating kmake based Project..."
+    core.command_view:enter("Project Name",{
+     submit = function(name)
+      local stat = system.get_file_info(core.project_dir .. PATHSEP .. "kfile.js")
+      if not stat then
+        if name ~= "" then
+          kinc.projectName = name
+        end
+        core.command_view:enter("Is Terminal Application ? (i.e. 0 or 1)",{ 
+                                submit = function(choice)
+                                    kinc.isKore = false
+                                    if choice == "1" then 
+                                      kinc.isTerm = true
+                                    end
+                                    createFiles()
+                                  end,
+                                suggest = noop,
+                                cancel = noop,
+                                validate = function() return true end,
+                                text = "",
+                                select_text = false,
+                                show_suggestions = true,
+                                typeahead = true,
+                                wrap = true,})
+    else
+      core.log "Project already contains a kfile.js ergo it already is a Kinc or Kmake Project"
+    end
+  end,
+  suggest = noop,
+  cancel = noop,
+  validate = function() return true end,
+  text = "",
+  select_text = false,
+  show_suggestions = true,
+  typeahead = true,
+  wrap = true,
+  })
+  end, --- END "kinc:create-kmake-project"
   
   ["kinc:set-global-kinc-folder"] = function()
     local dir_path = core.project_dir .. PATHSEP
     local user_filename = system.absolute_path(USERDIR .. PATHSEP .. "init.lua")
-    core.command_view:enter("Set Global Kinc Folder", function(text, item)
-      text = item and item.text or text
-      local isLocal = dir_path .. "Kinc" ~= text
-      if endsWith(text,PATHSEP .. "Kinc") and isLocal then
-        addKincPath(user_filename,text)
-      else
-        if isLocal then
-          core.log "Path doesn't end with Kinc, make sure you are passing a the path to Kinc"
+    core.command_view:enter("Set Global Kinc Folder",{
+    submit = function(text, item)
+        text = item and item.text or text
+        local isLocal = dir_path .. "Kinc" ~= text
+        if endsWith(text,PATHSEP .. "Kinc") and isLocal then
+          addKincPath(user_filename,text)
         else
-          core.log "Can't set current Project Kinc folder as global Kinc folder"
-        end
-      end 
-    end,suggest_directory)
+          if isLocal then
+            core.log "Path doesn't end with Kinc, make sure you are passing a the path to Kinc"
+          else
+            core.log "Can't set current Project Kinc folder as global Kinc folder"
+          end
+          return false
+        end 
+      end,
+    suggest = suggest_directory,
+    cancel = noop,
+    validate = function() return true end,
+    text = "",
+    select_text = false,
+    show_suggestions = true,
+    typeahead = true,
+    wrap = true,
+    })
   end,
   
   ["kinc:set-current-project-kinc-folder"] = function()
@@ -217,7 +306,7 @@ command.add(nil, {
 
 keymap.add { 
   ["ctrl+k"] = "kinc:create-kinc-project",
-  ["ctrl+alt+k"] = "kinc:create-kincmake-project", 
+  ["ctrl+alt+k"] = "kinc:create-kmake-project", 
 }
 
 return kinc
